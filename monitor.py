@@ -73,8 +73,8 @@ HISTORY_CSV = "price_history.csv"
 # ===== Viajeros y rutas (sin restricción de hora; solo fecha y origen/destino) =====
 TRAVELERS = [{"id": str(i), "travelerType": "ADULT"} for i in range(1, 5)]
 ORIGIN_DESTINATIONS = [
-    {"id": "1", "originLocationCode": "SJU", "destinationLocationCode": "FCO", "departureDateTimeRange": {"date": "2026-05-06"}},
-    {"id": "2", "originLocationCode": "FCO", "destinationLocationCode": "MAD", "departureDateTimeRange": {"date": "2026-05-17"}},
+    {"id": "1", "originLocationCode": "SJU", "destinationLocationCode": "FCO", "departureDateTimeRange": {"date": "2026-05-06"}};
+    {"id": "2", "originLocationCode": "FCO", "destinationLocationCode": "MAD", "departureDateTimeRange": {"date": "2026-05-17"}};
     {"id": "3", "originLocationCode": "MAD", "destinationLocationCode": "SJU", "departureDateTimeRange": {"date": "2026-05-20"}},
 ]
 
