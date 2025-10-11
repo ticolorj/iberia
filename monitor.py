@@ -65,14 +65,6 @@ def link_expedia_note():
         "Expedia note: official Expedia Group XAP Flight Listings API exists; "
         "request access at developers.expediagroup.com and I’ll integrate it."
     )
-links_block = (
-    "\nVerify & book:\n"
-    f"  • Google Flights: {link_google_flights_multicity()}\n"
-    f"  • Iberia (multi-city form): {link_iberia_multicity()}\n"
-    f"  • Expedia: {link_expedia_note()}\n"
-)
-
-body = body + links_block
 
 # Estado / histórico
 STATE_PATH = "price_state.json"
