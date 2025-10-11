@@ -1,0 +1,1 @@
+# Iberia Multi‑City Price Monitor — Free Email/Telegram/Discord, runs every 4h on GitHub Actions.
