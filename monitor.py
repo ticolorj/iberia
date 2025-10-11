@@ -40,6 +40,40 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 # Discord
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
+import urllib.parse
+
+def link_google_flights_multicity():
+    # Uses Google Flights natural-language query via the `q` parameter.
+    # Reference: https://www.google.com/travel/flights?q=...
+    # Source: StackOverflow shows that the 'q' parameter works for building queries.
+    q = (
+        "Flights from SJU to FCO on 2026-05-06, "
+        "from FCO to MAD on 2026-05-17, "
+        "from MAD to SJU on 2026-05-20"
+    )
+    return "https://www.google.com/travel/flights?q=" + urllib.parse.quote(q)
+
+def link_iberia_multicity():
+    # Official Iberia multi-legs page (can fill the form there)
+    return "https://www.iberia.com/us/flight-search-engine/multiple-legs/"
+
+def link_expedia_note():
+    # Expedia doesn’t offer a public deeplink spec for multi-city you can count on.
+    # If you obtain Expedia Group XAP API access, we can power a legal integration
+    # and include an Expedia deeplink from the API response.
+    return (
+        "Expedia note: official Expedia Group XAP Flight Listings API exists; "
+        "request access at developers.expediagroup.com and I’ll integrate it."
+    )
+links_block = (
+    "\nVerify & book:\n"
+    f"  • Google Flights: {link_google_flights_multicity()}\n"
+    f"  • Iberia (multi-city form): {link_iberia_multicity()}\n"
+    f"  • Expedia: {link_expedia_note()}\n"
+)
+
+body = body + links_block
+
 # Estado / histórico
 STATE_PATH = "price_state.json"
 HISTORY_CSV = "price_history.csv"
