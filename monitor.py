@@ -24,19 +24,19 @@ load_dotenv()
 PR_TZ = pytz.timezone("America/Puerto_Rico")
 
 # ===== Amadeus =====
-AMADEUS_API_KEY   = os.getenv("AMADEUS_API_KEY")
-AMADEUS_API_SECRET= os.getenv("AMADEUS_API_SECRET")
-AMADEUS_ENV       = os.getenv("AMADEUS_ENV", "test").lower()  # "test" o "production"
-CURRENCY          = os.getenv("CURRENCY", "USD")
+AMADEUS_API_KEY    = os.getenv("AMADEUS_API_KEY")
+AMADEUS_API_SECRET = os.getenv("AMADEUS_API_SECRET")
+AMADEUS_ENV        = os.getenv("AMADEUS_ENV", "test").lower()  # "test" o "production"
+CURRENCY           = os.getenv("CURRENCY", "USD")
 
 # ===== Email (SMTP) =====
-SMTP_HOST   = os.getenv("SMTP_HOST")
-SMTP_PORT   = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER   = os.getenv("SMTP_USER")
-SMTP_PASS   = os.getenv("SMTP_PASS")
-SMTP_USE_TLS= os.getenv("SMTP_USE_TLS", "true").lower() == "true"
-SMTP_FROM   = os.getenv("SMTP_FROM")
-SMTP_TO     = [e.strip() for e in os.getenv("SMTP_TO", "").split(",") if e.strip()]
+SMTP_HOST    = os.getenv("SMTP_HOST")
+SMTP_PORT    = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER    = os.getenv("SMTP_USER")
+SMTP_PASS    = os.getenv("SMTP_PASS")
+SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() == "true"
+SMTP_FROM    = os.getenv("SMTP_FROM")
+SMTP_TO      = [e.strip() for e in os.getenv("SMTP_TO", "").split(",") if e.strip()]
 
 # ===== Parámetros del viaje (4 ADT, ECONOMY, Iberia) =====
 TRAVELERS = [{"id": str(i), "travelerType": "ADULT"} for i in range(1, 5)]
@@ -128,6 +128,34 @@ def best_price_from_response(data):
             best = (price_val, off)
     return best  # puede ser None si no hubo coincidencias
 
+# ====== NUEVO: helpers para horas de salida ======
+def parse_iso(dt_str):
+    try:
+        return datetime.fromisoformat(dt_str)
+    except Exception:
+        return None
+
+def first_departure_local_str(offer):
+    """
+    Toma el primer segmento del primer itinerario de la oferta y devuelve
+    'YYYY-MM-DD HH:MM' en hora local del aeropuerto (Amadeus ya entrega hora local).
+    Si no hay datos suficientes, devuelve '(hora no disponible)'.
+    """
+    try:
+        itins = offer.get("itineraries", [])
+        if not itins:
+            return "(hora no disponible)"
+        segs = itins[0].get("segments", [])
+        if not segs:
+            return "(hora no disponible)"
+        dep_at = segs[0].get("departure", {}).get("at", "")
+        if not dep_at:
+            return "(hora no disponible)"
+        dt = parse_iso(dep_at)
+        return (dt.strftime("%Y-%m-%d %H:%M") if dt else dep_at.replace("T", " ")[:16])
+    except Exception:
+        return "(hora no disponible)"
+
 # ===== Email notifier =====
 def notify_email(subject, body):
     if not (SMTP_HOST and SMTP_FROM and SMTP_TO):
@@ -160,11 +188,11 @@ def main():
     for (o, d, date_iso, label) in LEGS:
         try:
             data = search_leg_offers(token, o, d, date_iso)
-            best = best_price_from_response(data)
-            results.append((label, best))
+            best = best_price_from_response(data)  # (price, offer) o None
+            results.append((label, date_iso, best))
         except Exception as e:
             print(f"[ERROR] {label}: {e}")
-            results.append((label, None))
+            results.append((label, date_iso, None))
 
     # Armar el mensaje
     now_pr = datetime.now(PR_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -175,22 +203,33 @@ def main():
 
     total = 0.0
     all_have_price = True
+    departures_overview = []  # para una línea resumen con horas
 
-    for label, best in results:
+    for label, date_iso, best in results:
         if best is None:
             lines.append(f"• {label}: SIN OFERTAS COINCIDENTES")
             all_have_price = False
+            departures_overview.append(f"{label.split('(')[0].strip()}: (hora no disponible)")
         else:
             price, offer = best
             val = ",".join(offer.get("validatingAirlineCodes", []))
-            lines.append(f"• {label}: {CURRENCY} {price:.2f}   (validating: {val})")
+            dep_local = first_departure_local_str(offer)
+            lines.append(f"• {label}: {CURRENCY} {price:.2f}   (validating: {val})   Salida (local): {dep_local}")
             total += price
+            # Para la línea de resumen final, solo origen→destino + hora
+            short_label = label.split("(")[0].strip()
+            departures_overview.append(f"{short_label}: {dep_local}")
 
     lines.append("")
     if all_have_price:
         lines.append(f"TOTAL COMBINADO (suma tramos separados): {CURRENCY} {total:.2f}")
     else:
         lines.append("TOTAL COMBINADO: N/D (no hay precio en todos los tramos)")
+
+    # Resumen de horas en una sola línea
+    lines.append("")
+    lines.append("Horas de salida (local) seleccionadas por tramo: ")
+    lines.append(" | ".join(departures_overview))
 
     lines.append("")
     lines.append("Nota: Los precios por tramo no siempre equivalen al precio de un ticket multicity; verifícalos antes de comprar.")
@@ -199,7 +238,7 @@ def main():
     print(message)
 
     # Enviar email
-    notify_email("Iberia price update — separate legs", message)
+    notify_email("Iberia price update — separate legs (with times)", message)
 
 if __name__ == "__main__":
     main()
