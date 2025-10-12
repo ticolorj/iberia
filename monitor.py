@@ -5,7 +5,7 @@
 #   3) MAD → SJU  (2026-05-20 15:50)
 #
 # Notificaciones: Email (SMTP)
-# Umbrales de alerta (Economy Optimal):
+# Umbrales de alerta (tarifa Optimal):
 #   SJU→FCO < 850 USD, FCO→MAD < 350 USD, MAD→SJU < 550 USD
 
 import os
@@ -113,16 +113,16 @@ def offer_is_for_exact_time(offer, origin, destination, date_iso, time_hhmm):
     hhmm = at.split("T")[1][:5] if "T" in at else at[11:16]
     return hhmm == time_hhmm
 
-def offer_is_economy_optimal(offer):
-    """Busca 'ECONOMY OPTIMAL' o 'OPTIMAL' en branded fares."""
+def offer_is_optimal(offer):
+    """Detecta 'OPTIMAL' en branded fares."""
     for t in offer.get("travelerPricings", []):
         for fd in t.get("fareDetailsBySegment", []):
             brand = (fd.get("brandedFare") or "").upper()
-            if "ECONOMY OPTIMAL" in brand or brand.strip() == "OPTIMAL":
+            if brand == "OPTIMAL" or "OPTIMAL" in brand:
                 return True
     return False
 
-def best_economy_optimal_price(data, origin, destination, date_iso, time_hhmm):
+def best_optimal_price(data, origin, destination, date_iso, time_hhmm):
     offers = data.get("data", [])
     best = None
     for off in offers:
@@ -131,7 +131,7 @@ def best_economy_optimal_price(data, origin, destination, date_iso, time_hhmm):
             continue
         if not offer_is_for_exact_time(off, origin, destination, date_iso, time_hhmm):
             continue
-        if not offer_is_economy_optimal(off):
+        if not offer_is_optimal(off):
             continue
         price = off.get("price", {}).get("grandTotal")
         if not price: continue
@@ -144,14 +144,10 @@ def best_economy_optimal_price(data, origin, destination, date_iso, time_hhmm):
 
 def first_departure_local_str(offer):
     try:
-        itins = offer.get("itineraries", [])
-        if not itins: return "(hora no disponible)"
-        segs = itins[0].get("segments", [])
-        if not segs: return "(hora no disponible)"
-        dep_at_raw = segs[0].get("departure", {}).get("at", "")
-        if not dep_at_raw: return "(hora no disponible)"
-        dt = parse_iso(dep_at_raw)
-        return dt.strftime("%Y-%m-%d %H:%M") if dt else dep_at_raw.replace("T", " ")[:16]
+        segs = offer.get("itineraries", [])[0].get("segments", [])
+        dep = segs[0].get("departure", {}).get("at", "")
+        dt = parse_iso(dep)
+        return dt.strftime("%Y-%m-%d %H:%M") if dt else dep
     except Exception:
         return "(hora no disponible)"
 
@@ -168,14 +164,14 @@ def notify_email(subject, body):
         print("[Email Error]", e)
 
 def load_state():
-    if not os.path.exists(STATE_PATH): return {}
+    if not os.path.exists("leg_price_state.json"): return {}
     try:
-        with open(STATE_PATH, "r", encoding="utf-8") as f: return json.load(f)
+        with open("leg_price_state.json", "r", encoding="utf-8") as f: return json.load(f)
     except Exception: return {}
 
 def save_state(obj):
     try:
-        with open(STATE_PATH, "w", encoding="utf-8") as f: json.dump(obj, f)
+        with open("leg_price_state.json", "w", encoding="utf-8") as f: json.dump(obj, f)
     except Exception as e: print("[State Save Error]", e)
 
 def main():
@@ -183,7 +179,7 @@ def main():
         raise RuntimeError("Faltan credenciales de Amadeus.")
     token = get_access_token()
     now = datetime.now(PR_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
-    lines = [f"[Iberia Watch — Economy Optimal] {now}", "Precios actuales por tramo exacto:", ""]
+    lines = [f"[Iberia Watch — Optimal Fare] {now}", "Precios actuales (tarifa Optimal):", ""]
     state, alerts = load_state(), []
 
     for (o, d, date_iso, hhmm, label) in LEGS:
@@ -194,9 +190,9 @@ def main():
 
         try:
             data = search_leg_offers(token, o, d, date_iso)
-            best = best_economy_optimal_price(data, o, d, date_iso, hhmm)
+            best = best_optimal_price(data, o, d, date_iso, hhmm)
             if not best:
-                lines.append(f"• {label}: (Economy Optimal no disponible)")
+                lines.append(f"• {label}: (Tarifa Optimal no disponible)")
                 continue
 
             price, offer = best
@@ -204,11 +200,9 @@ def main():
             delta = ""
             if isinstance(last, (int, float)):
                 diff = price - last
-                if diff < 0: delta = f" (▼ {abs(diff):.2f})"
-                elif diff > 0: delta = f" (▲ {diff:.2f})"
-                else: delta = " (sin cambio)"
+                delta = f" (▼ {abs(diff):.2f})" if diff < 0 else f" (▲ {diff:.2f})" if diff > 0 else " (sin cambio)"
 
-            lines.append(f"• {label}: {CURRENCY} {price:.2f}{delta}   Salida: {dep}   [Economy Optimal]")
+            lines.append(f"• {label}: {CURRENCY} {price:.2f}{delta}   Salida: {dep}   [Optimal]")
 
             if threshold and price < threshold and not alerted:
                 alerts.append(f"{label}: bajó de {CURRENCY} {threshold:.2f} → ahora {CURRENCY} {price:.2f}")
@@ -222,12 +216,12 @@ def main():
 
     msg = "\n".join(lines)
     print(msg)
-    notify_email("Iberia – Economy Optimal price update", msg)
+    notify_email("Iberia – Optimal Fare price update", msg)
 
     if alerts:
-        alert_body = "[Iberia Watch] ALERTAS Economy Optimal\n\n" + "\n".join(alerts)
+        alert_body = "[Iberia Watch] ALERTAS Tarifa Optimal\n\n" + "\n".join(alerts)
         print(alert_body)
-        notify_email("Iberia ALERTA – Economy Optimal bajo umbral", alert_body)
+        notify_email("Iberia ALERTA – Tarifa Optimal bajo umbral", alert_body)
 
     save_state(state)
 
