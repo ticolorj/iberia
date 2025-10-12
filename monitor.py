@@ -39,7 +39,7 @@ SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() == "true"
 SMTP_FROM    = os.getenv("SMTP_FROM")
 SMTP_TO      = [e.strip() for e in os.getenv("SMTP_TO", "").split(",") if e.strip()]
 
-# ===== Parámetros del viaje (4 ADT, ECONOMY, Iberia) =====
+# ===== Parámetros del viaje =====
 TRAVELERS = [{"id": str(i), "travelerType": "ADULT"} for i in range(1, 5)]
 
 # Cada tramo con hora exacta requerida (local del aeropuerto) HH:MM
@@ -57,18 +57,14 @@ THRESHOLDS = {
     ("MAD", "SJU", "2026-05-20", "15:50"): 550.0,
 }
 
-STATE_PATH = "leg_price_state.json"  # para recordar si ya alertó por estar debajo
+STATE_PATH = "leg_price_state.json"  # guarda último precio y si ya alertó por estar debajo
 
 def amadeus_host():
     return "https://api.amadeus.com" if AMADEUS_ENV == "production" else "https://test.api.amadeus.com"
 
 def get_access_token():
     url = amadeus_host() + "/v1/security/oauth2/token"
-    data = {
-        "grant_type": "client_credentials",
-        "client_id": AMADEUS_API_KEY,
-        "client_secret": AMADEUS_API_SECRET
-    }
+    data = {"grant_type": "client_credentials", "client_id": AMADEUS_API_KEY, "client_secret": AMADEUS_API_SECRET}
     r = requests.post(url, data=data, timeout=30)
     if r.status_code != 200:
         try:
@@ -80,22 +76,19 @@ def get_access_token():
 
 def search_leg_offers(token, origin, destination, date_iso):
     """
-    Busca ofertas SOLO para un tramo: origin -> destination en date_iso.
-    Filtros: Iberia (IB), ECONOMY, 4 ADT.
+    Ofertas SOLO para un tramo: origin -> destination en date_iso.
+    Filtros: Iberia (IB), ECONOMY, 4 ADT, branded fares ON.
     """
     url = amadeus_host() + "/v2/shopping/flight-offers"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-
     body = {
         "currencyCode": CURRENCY,
-        "originDestinations": [
-            {
-                "id": "1",
-                "originLocationCode": origin,
-                "destinationLocationCode": destination,
-                "departureDateTimeRange": {"date": date_iso}
-            }
-        ],
+        "originDestinations": [{
+            "id": "1",
+            "originLocationCode": origin,
+            "destinationLocationCode": destination,
+            "departureDateTimeRange": {"date": date_iso}
+        }],
         "travelers": TRAVELERS,
         "sources": ["GDS"],
         "searchCriteria": {
@@ -111,7 +104,6 @@ def search_leg_offers(token, origin, destination, date_iso):
             "maxFlightOffers": 200
         }
     }
-
     r = requests.post(url, headers=headers, json=body, timeout=90)
     r.raise_for_status()
     return r.json()
@@ -129,28 +121,21 @@ def offer_is_for_exact_time(offer, origin, destination, date_iso, time_hhmm):
       - llegue a 'destination' (primer segmento).
     """
     itins = offer.get("itineraries", [])
-    if not itins:
-        return False
+    if not itins: return False
     segs = itins[0].get("segments", [])
-    if not segs:
-        return False
+    if not segs: return False
     first = segs[0]
     dep = first.get("departure", {})
     arr = first.get("arrival", {})
-    at = dep.get("at", "")  # e.g. "2026-05-06T20:25:00"
-    if dep.get("iataCode") != origin:
-        return False
-    if arr.get("iataCode") != destination:
-        return False
-    if not at.startswith(date_iso + "T"):
-        return False
+    at = dep.get("at", "")  # "YYYY-MM-DDTHH:MM:SS"
+    if dep.get("iataCode") != origin: return False
+    if arr.get("iataCode") != destination: return False
+    if not at.startswith(date_iso + "T"): return False
     hhmm = at.split("T")[1][:5] if "T" in at else at[11:16]
     return hhmm == time_hhmm
 
 def offer_is_optima(offer):
-    """
-    Detecta si en fareDetailsBySegment aparece marca OPTIMA/OPTIMAL (branded fares).
-    """
+    """True si hay 'OPTIMA'/'OPTIMAL' en branded fares."""
     for t in offer.get("travelerPricings", []):
         for fd in t.get("fareDetailsBySegment", []):
             brand = (fd.get("brandedFare") or "").upper()
@@ -160,14 +145,13 @@ def offer_is_optima(offer):
 
 def best_optima_price_for_exact_time(data, origin, destination, date_iso, time_hhmm):
     """
-    Filtra ofertas que coincidan EXACTAMENTE con la hora de salida y devuelvan OPTIMA/OPTIMAL,
-    y elige la de menor precio.
+    Elige la oferta OPTIMA/OPTIMAL más barata que cumpla la hora exacta.
     Retorna (price_float, offer) o None.
     """
     offers = data.get("data", [])
     best = None
     for off in offers:
-        # Mantener validadora IB si aparece
+        # Preferir validadora IB si aparece
         validating = off.get("validatingAirlineCodes", [])
         if validating and "IB" not in validating:
             continue
@@ -206,7 +190,7 @@ def notify_email(subject, body):
     except Exception as e:
         print("[Email Error]", e)
 
-# ===== Estado para anti-spam de alertas =====
+# ===== Estado =====
 def load_state():
     if not os.path.exists(STATE_PATH):
         return {}
@@ -223,82 +207,103 @@ def save_state(obj):
     except Exception as e:
         print("[State Save Error]", e)
 
+def first_departure_local_str(offer):
+    """Formatea la salida local del primer segmento del primer itinerario."""
+    try:
+        itins = offer.get("itineraries", [])
+        if not itins: return "(hora no disponible)"
+        segs = itins[0].get("segments", [])
+        if not segs: return "(hora no disponible)"
+        dep_at_raw = segs[0].get("departure", {}).get("at", "")
+        if not dep_at_raw: return "(hora no disponible)"
+        dt = parse_iso(dep_at_raw)
+        return dt.strftime("%Y-%m-%d %H:%M") if dt else dep_at_raw.replace("T", " ")[:16]
+    except Exception:
+        return "(hora no disponible)"
+
 def main():
-    # Validaciones mínimas
     if not (AMADEUS_API_KEY and AMADEUS_API_SECRET):
         raise RuntimeError("Faltan credenciales de Amadeus (AMADEUS_API_KEY / AMADEUS_API_SECRET).")
 
     token = get_access_token()
     now_pr = datetime.now(PR_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
-    lines = [f"[Iberia Watch — exact legs (OPTIMA)] {now_pr}",
-             f"Moneda: {CURRENCY}",
-             "Resultados (precio OPTIMA si existe) para tramos exactos por hora:",
-             ""]
+    lines = [
+        f"[Iberia Watch — exact flights (OPTIMA)] {now_pr}",
+        f"Moneda: {CURRENCY}",
+        "Precios actuales (por tramo exacto) y estado vs última corrida:",
+        ""
+    ]
+
     state = load_state()
     alerts = []
 
     for (o, d, date_iso, hhmm, label) in LEGS:
+        key = f"{o}-{d}-{date_iso}-{hhmm}"
+        threshold = THRESHOLDS.get((o, d, date_iso, hhmm))
+        last_price = state.get(key, {}).get("last_price")
+        alerted_below = state.get(key, {}).get("alerted_below", False)
+
         try:
             data = search_leg_offers(token, o, d, date_iso)
             best = best_optima_price_for_exact_time(data, o, d, date_iso, hhmm)  # (price, offer) o None
 
-            key = f"{o}-{d}-{date_iso}-{hhmm}"
-            threshold = THRESHOLDS.get((o, d, date_iso, hhmm), None)
-
             if best is None:
-                lines.append(f"• {label}: SIN OFERTAS OPTIMA A ESA HORA")
-                # Mantén el último precio como None
+                # Mostrar que no hay OPTIMA a esa hora, pero registrar last_price=None
+                lines.append(f"• {label}: (OPTIMA no disponible ahora mismo)")
                 state.setdefault(key, {})
                 state[key]["last_price"] = None
-                state[key].setdefault("alerted_below", False)
-            else:
-                price, offer = best
-                dep_at = "(hora no disponible)"
-                try:
-                    first_seg = offer.get("itineraries", [])[0].get("segments", [])[0]
-                    dep_at_raw = first_seg.get("departure", {}).get("at", "")
-                    dep_at = (datetime.fromisoformat(dep_at_raw).strftime("%Y-%m-%d %H:%M")
-                              if dep_at_raw else dep_at)
-                except Exception:
-                    pass
+                # si no hay precio, no evaluamos umbral
+                continue
 
-                lines.append(f"• {label}: {CURRENCY} {price:.2f}   Salida (local): {dep_at}   [OPTIMA]")
+            price, offer = best
+            dep_local = first_departure_local_str(offer)
+            delta_txt = ""
+            if isinstance(last_price, (int, float)):
+                diff = price - last_price
+                if abs(diff) < 0.005:
+                    delta_txt = " (↔ sin cambio)"
+                elif diff < 0:
+                    delta_txt = f" (▼ {CURRENCY} {abs(diff):.2f})"
+                else:
+                    delta_txt = f" (▲ {CURRENCY} {diff:.2f})"
 
-                # Lógica de alerta por cruce de umbral (solo cuando baja de umbral)
-                state.setdefault(key, {})
-                last_price = state[key].get("last_price")
-                alerted_below = state[key].get("alerted_below", False)
+            lines.append(f"• {label}: {CURRENCY} {price:.2f}{delta_txt}   Salida (local): {dep_local}   [OPTIMA]")
 
-                crossed_down = False
-                if threshold is not None:
-                    if price < threshold and (not alerted_below):
-                        crossed_down = True
-                        alerts.append(
-                            f"ALERTA: {label} bajó de {CURRENCY} {threshold:.2f} → ahora {CURRENCY} {price:.2f} (OPTIMA)"
-                        )
-                        state[key]["alerted_below"] = True
-                    elif price >= threshold and alerted_below:
-                        # se “resetea” si volvió a subir por encima
-                        state[key]["alerted_below"] = False
+            # Lógica de alerta por umbral (solo cuando cruza de arriba→abajo)
+            if threshold is not None:
+                if price < threshold and not alerted_below:
+                    alerts.append(
+                        f"{label}: cayó por debajo de {CURRENCY} {threshold:.2f} → ahora {CURRENCY} {price:.2f} (OPTIMA)"
+                    )
+                    state.setdefault(key, {})
+                    state[key]["alerted_below"] = True
+                elif price >= threshold and alerted_below:
+                    # se resetea si volvió a subir
+                    state.setdefault(key, {})
+                    state[key]["alerted_below"] = False
 
-                state[key]["last_price"] = price
+            # Actualiza último precio
+            state.setdefault(key, {})
+            state[key]["last_price"] = price
 
         except Exception as e:
             print(f"[ERROR] {label}: {e}")
             lines.append(f"• {label}: ERROR consultando el tramo")
 
-    # Resumen y notas
+    # Mensaje principal con precios actuales
     lines.append("")
-    lines.append("Nota: cada tramo se consulta y evalúa de forma independiente; los importes son para 4 ADT en ECONOMY (OPTIMA si está disponible).")
+    lines.append("Notas:")
+    lines.append("- Se muestran precios actuales para cada tramo exacto (4 ADT, ECONOMY, Iberia, OPTIMA si está disponible).")
+    lines.append("- Las alertas se envían solo cuando el precio cruza por debajo del umbral definido (anti-spam); si luego sube, se resetea.")
     message = "\n".join(lines)
+    print(message)
+    notify_email("Iberia — precios actuales por vuelo (OPTIMA) + alertas", message)
 
-    # Enviar correo con el reporte general
-    notify_email("Iberia exact flights — OPTIMA price report", message)
-
-    # Si hubo alertas por cruce de umbral, enviar correo adicional con solo alertas
+    # Email de alertas (solo si hubo cruces)
     if alerts:
-        alert_body = "[Iberia Watch] Price drop alerts (OPTIMA)\n\n" + "\n".join(alerts)
-        notify_email("Iberia ALERTA — Precio por debajo del umbral (OPTIMA)", alert_body)
+        alert_body = "[Iberia Watch] Alertas por caída de precio (OPTIMA)\n\n" + "\n".join(alerts)
+        print(alert_body)
+        notify_email("Iberia — ALERTA: precio bajo umbral (OPTIMA)", alert_body)
 
     save_state(state)
 
