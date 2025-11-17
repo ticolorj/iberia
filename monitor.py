@@ -1,14 +1,14 @@
 # monitor.py — Iberia (IB) – 4 adultos – ECONOMY
-# Tramos exactos por hora:
-#   1) SJU → FCO  (2026-05-06 20:25)
-#   2) FCO → MAD  (2026-05-17 14:45)
-#   3) MAD → SJU  (2026-05-20 15:50)
+# Tramos por fecha (sin hora específica):
+#   1) SJU → FCO  (2026-05-06, cualquier hora)
+#   2) MAD → SJU  (2026-05-20, cualquier hora)
 #
 # Notificaciones: Email (SMTP)
-# Umbrales de alerta (Economy) — por ADULTO:
-#   SJU→FCO < 850 USD, FCO→MAD < 350 USD, MAD→SJU < 550 USD
+# Umbrales de alerta (Economy) — por ADULTO (se usa el precio más barato del día):
+#   SJU→FCO < 850 USD, MAD→SJU < 550 USD
 
 import os
+import re
 import smtplib
 import pytz
 import requests
@@ -39,17 +39,16 @@ SMTP_TO      = [e.strip() for e in os.getenv("SMTP_TO", "").split(",") if e.stri
 NUM_ADULTS = int(os.getenv("NUM_ADULTS", "4"))
 TRAVELERS = [{"id": str(i), "travelerType": "ADULT"} for i in range(1, NUM_ADULTS + 1)]
 
+# Solo 2 tramos, sin hora específica
 LEGS = [
-    ("SJU", "FCO", "2026-05-06", "20:25", "SJU → FCO (2026-05-06 20:25)"),
-    ("FCO", "MAD", "2026-05-17", "14:45", "FCO → MAD (2026-05-17 14:45)"),
-    ("MAD", "SJU", "2026-05-20", "15:50", "MAD → SJU (2026-05-20 15:50)"),
+    ("SJU", "FCO", "2026-05-06", "SJU → FCO (2026-05-06)"),
+    ("MAD", "SJU", "2026-05-20", "MAD → SJU (2026-05-20)"),
 ]
 
-# UMBRALES POR ADULTO
+# UMBRALES POR ADULTO (por fecha completa, se compara con la opción más barata del día)
 THRESHOLDS = {
-    ("SJU", "FCO", "2026-05-06", "20:25"): 850.0,
-    ("FCO", "MAD", "2026-05-17", "14:45"): 350.0,
-    ("MAD", "SJU", "2026-05-20", "15:50"): 550.0,
+    ("SJU", "FCO", "2026-05-06"): 850.0,
+    ("MAD", "SJU", "2026-05-20"): 550.0,
 }
 
 STATE_PATH = "leg_price_state.json"
@@ -75,7 +74,7 @@ def get_access_token():
 
 
 def search_leg_offers(token, origin, destination, date_iso):
-    """Búsqueda por tramo, Iberia (marketing), ECONOMY cabin, branded fares ON."""
+    """Búsqueda por tramo, Iberia (marketing), ECONOMY cabin, branded fares ON, cualquier hora del día."""
     url = amadeus_host() + "/v2/shopping/flight-offers"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     body = {
@@ -84,7 +83,7 @@ def search_leg_offers(token, origin, destination, date_iso):
             "id": "1",
             "originLocationCode": origin,
             "destinationLocationCode": destination,
-            "departureDateTimeRange": {"date": date_iso}  # YYYY-MM-DD
+            "departureDateTimeRange": {"date": date_iso}  # YYYY-MM-DD, sin hora
         }],
         "travelers": TRAVELERS,
         "sources": ["GDS"],
@@ -133,23 +132,8 @@ def itinerary_matches(offer, origin, destination):
     return dep.get("iataCode") == origin and arr.get("iataCode") == destination
 
 
-def offer_is_for_exact_time(offer, date_iso, time_hhmm):
-    """Compara la hora exacta local de salida del PRIMER segmento."""
-    itins = offer.get("itineraries", [])
-    if not itins:
-        return False
-    segs = itins[0].get("segments", [])
-    if not segs:
-        return False
-    dep_at = segs[0].get("departure", {}).get("at", "")
-    if not dep_at.startswith(date_iso + "T"):
-        return False
-    hhmm = dep_at.split("T")[1][:5] if "T" in dep_at else dep_at[11:16]
-    return hhmm == time_hhmm
-
-
 def any_marketing_ib(offer):
-    """Casi redundante por el filtro, pero lo dejamos por seguridad."""
+    """Redundante por el filtro, pero lo dejamos por seguridad."""
     try:
         for seg in offer.get("itineraries", [])[0].get("segments", []):
             carrier = seg.get("carrierCode")  # marketing carrier
@@ -205,17 +189,16 @@ def per_adult_price(offer):
     return per_adult, grand_total
 
 
-def best_economy_price(data, origin, destination, date_iso, time_hhmm):
+def sorted_economy_offers(data, origin, destination, date_iso):
     """
-    Devuelve la mejor oferta para esa hora exacta (acepta conexiones).
-    Retorna (per_adult, grand_total, offer) o None.
+    Filtra ofertas Economy de Iberia para la fecha dada y devuelve
+    una lista ordenada por precio por adulto ascendente:
+    [(per_adult, grand_total, offer), ...]
     """
     offers = data.get("data", []) or []
-    best = None
+    results = []
     for off in offers:
         if not itinerary_matches(off, origin, destination):
-            continue
-        if not offer_is_for_exact_time(off, date_iso, time_hhmm):
             continue
         if not any_marketing_ib(off):
             continue
@@ -224,19 +207,67 @@ def best_economy_price(data, origin, destination, date_iso, time_hhmm):
         if per_adult is None:
             continue
 
-        if best is None or per_adult < best[0]:
-            best = (per_adult, grand_total, off)
-    return best
+        results.append((per_adult, grand_total, off))
+
+    results.sort(key=lambda x: x[0])
+    return results
 
 
-def first_departure_local_str(offer):
-    try:
-        segs = offer.get("itineraries", [])[0].get("segments", [])
-        dep = segs[0].get("departure", {}).get("at", "")
-        dt = parse_iso(dep)
-        return dt.strftime("%Y-%m-%d %H:%M") if dt else dep.replace("T", " ")[:16]
-    except Exception:
-        return "(hora no disponible)"
+def duration_iso_to_hm(iso_duration):
+    """
+    Convierte una duración ISO 8601 tipo 'PT10H35M' a '10h 35m'.
+    Si falla, devuelve la cadena original.
+    """
+    if not iso_duration:
+        return ""
+    m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?", iso_duration)
+    if not m:
+        return iso_duration
+    hours = m.group(1)
+    mins = m.group(2)
+    parts = []
+    if hours:
+        parts.append(f"{hours}h")
+    if mins:
+        parts.append(f"{mins}m")
+    return " ".join(parts) if parts else iso_duration
+
+
+def itinerary_summary(offer):
+    """
+    Devuelve un resumen de itinerario con horas, duración, escalas y vuelos.
+    """
+    itins = offer.get("itineraries", [])
+    if not itins:
+        return "(itinerario no disponible)"
+
+    segs = itins[0].get("segments", [])
+    if not segs:
+        return "(itinerario no disponible)"
+
+    first = segs[0]
+    last = segs[-1]
+
+    dep_at_raw = first.get("departure", {}).get("at", "")
+    arr_at_raw = last.get("arrival", {}).get("at", "")
+
+    dep_dt = parse_iso(dep_at_raw)
+    arr_dt = parse_iso(arr_at_raw)
+
+    dep_str = dep_dt.strftime("%Y-%m-%d %H:%M") if dep_dt else dep_at_raw.replace("T", " ")[:16]
+    arr_str = arr_dt.strftime("%Y-%m-%d %H:%M") if arr_dt else arr_at_raw.replace("T", " ")[:16]
+
+    num_stops = max(0, len(segs) - 1)
+    stops_str = "directo" if num_stops == 0 else f"{num_stops} escala(s)"
+
+    duration_iso = itins[0].get("duration", "")
+    duration_str = duration_iso_to_hm(duration_iso) if duration_iso else ""
+
+    flights_str = " / ".join(
+        f"{s.get('carrierCode', '')}{s.get('number', '')}" for s in segs
+    )
+
+    return f"Salida: {dep_str}, Llegada: {arr_str}, Duración: {duration_str}, {stops_str}, Vuelos: {flights_str}"
 
 
 def notify_email(subject, body):
@@ -277,47 +308,62 @@ def save_state(obj):
 def main():
     if not (AMADEUS_API_KEY and AMADEUS_API_SECRET):
         raise RuntimeError("Faltan credenciales de Amadeus (AMADEUS_API_KEY/SECRET).")
+
     token = get_access_token()
     now = datetime.now(PR_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
-    lines = [f"[Iberia Watch — Economy Fare] {now}", f"Precios actuales por tramo exacto (por adulto, {NUM_ADULTS} ADT):", ""]
+    lines = [
+        f"[Iberia Watch — Economy Fare] {now}",
+        f"Precios actuales por tramo y fecha (por adulto, {NUM_ADULTS} ADT):",
+        ""
+    ]
     state, alerts = load_state(), []
 
-    for (o, d, date_iso, hhmm, label) in LEGS:
-        key = f"{o}-{d}-{date_iso}-{hhmm}"
-        threshold = THRESHOLDS.get((o, d, date_iso, hhmm))
+    for (o, d, date_iso, label) in LEGS:
+        key = f"{o}-{d}-{date_iso}"
+        threshold = THRESHOLDS.get((o, d, date_iso))
         last = state.get(key, {}).get("last_price_per_adult")
         alerted = state.get(key, {}).get("alerted_below", False)
 
         try:
             data = search_leg_offers(token, o, d, date_iso)
-            best = best_economy_price(data, o, d, date_iso, hhmm)
-            if not best:
-                lines.append(f"• {label}: (Economy no disponible para esa hora exacta)")
+            sorted_offers = sorted_economy_offers(data, o, d, date_iso)
+            if not sorted_offers:
+                lines.append(f"• {label}: (Economy de Iberia no disponible para esa fecha)")
                 continue
 
-            price_pp, price_total, offer = best
-            dep = first_departure_local_str(offer)
-            delta = ""
+            # Tomar las 3 más baratas
+            top3 = sorted_offers[:3]
+            cheapest_pp = top3[0][0]
+
+            # Calcular delta con respecto al último precio guardado (usando el más barato)
+            delta_str = ""
             if isinstance(last, (int, float)):
-                diff = price_pp - last
+                diff = cheapest_pp - last
                 if diff < 0:
-                    delta = f" (▼ {abs(diff):.2f})"
+                    delta_str = f" (▼ {abs(diff):.2f})"
                 elif diff > 0:
-                    delta = f" (▲ {diff:.2f})"
+                    delta_str = f" (▲ {diff:.2f})"
                 else:
-                    delta = " (sin cambio)"
+                    delta_str = " (sin cambio)"
 
-            total_str = f" | Total {CURRENCY} {price_total:.2f}" if price_total is not None else ""
-            lines.append(f"• {label}: {CURRENCY} {price_pp:.2f}{delta}{total_str}   Salida: {dep}   [Economy]")
+            lines.append(f"• {label}: 3 opciones más baratas [Economy]{delta_str}")
+            for idx, (price_pp, price_total, offer) in enumerate(top3, start=1):
+                total_str = f" | Total {CURRENCY} {price_total:.2f}" if price_total is not None else ""
+                summary = itinerary_summary(offer)
+                lines.append(
+                    f"    {idx}) {CURRENCY} {price_pp:.2f}{total_str}  ->  {summary}"
+                )
 
-            # Alertas por adulto
-            if threshold and price_pp < threshold and not alerted:
-                alerts.append(f"{label}: bajó de {CURRENCY} {threshold:.2f}/ADT → ahora {CURRENCY} {price_pp:.2f}/ADT")
+            # Alertas por adulto usando el precio más bajo del día
+            if threshold and cheapest_pp < threshold and not alerted:
+                alerts.append(
+                    f"{label}: bajó de {CURRENCY} {threshold:.2f}/ADT → ahora {CURRENCY} {cheapest_pp:.2f}/ADT"
+                )
                 state.setdefault(key, {})["alerted_below"] = True
-            elif threshold and price_pp >= threshold and alerted:
+            elif threshold and cheapest_pp >= threshold and alerted:
                 state.setdefault(key, {})["alerted_below"] = False
 
-            state.setdefault(key, {})["last_price_per_adult"] = price_pp
+            state.setdefault(key, {})["last_price_per_adult"] = cheapest_pp
 
         except Exception as e:
             lines.append(f"• {label}: ERROR ({e})")
