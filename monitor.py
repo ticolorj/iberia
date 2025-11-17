@@ -189,7 +189,7 @@ def per_adult_price(offer):
     return per_adult, grand_total
 
 
-def sorted_economy_offers(data, origin, destination, date_iso):
+def sorted_economy_offers(data, origin, destination):
     """
     Filtra ofertas Economy de Iberia para la fecha dada y devuelve
     una lista ordenada por precio por adulto ascendente:
@@ -326,7 +326,7 @@ def main():
 
         try:
             data = search_leg_offers(token, o, d, date_iso)
-            sorted_offers = sorted_economy_offers(data, o, d, date_iso)
+            sorted_offers = sorted_economy_offers(data, o, d)
             if not sorted_offers:
                 lines.append(f"• {label}: (Economy de Iberia no disponible para esa fecha)")
                 continue
